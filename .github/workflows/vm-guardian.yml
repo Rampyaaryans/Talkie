@@ -39,16 +39,23 @@ jobs:
           OCI_KEY_CONTENT: ${{ secrets.OCI_SIGNING_KEY }}
         run: |
           mkdir -p ~/.oci
-          # Write config file — use $HOME not ~ (OCI CLI doesn't expand ~)
-          printf '%s\n' "$OCI_CONFIG_CONTENT" > ~/.oci/config
-          # Replace key_file=~/ with key_file=$HOME/ for OCI CLI compatibility
-          sed -i "s|key_file=~/|key_file=$HOME/|g" ~/.oci/config
-          # Write private signing key
+          # Write private signing key from secret
           printf '%s\n' "$OCI_KEY_CONTENT" > ~/.oci/oci_signing_key.pem
-          chmod 600 ~/.oci/config ~/.oci/oci_signing_key.pem
-          # Verify (grep redacts secrets automatically)
-          echo "key_file line: $(grep key_file ~/.oci/config)"
-          echo "Key file size: $(wc -c < ~/.oci/oci_signing_key.pem) bytes"
+          chmod 600 ~/.oci/oci_signing_key.pem
+          # Write config MANUALLY field by field — avoids any whitespace/encoding from secret
+          cat > ~/.oci/config << EOF
+[DEFAULT]
+user=ocid1.user.oc1..aaaaaaaa6tbdlgy2vcmh7tbos6hvvt5r4phsogby6oxbkrfoe4o7qld536ea
+fingerprint=e4:22:ee:4b:ea:e4:c9:96:20:bf:7e:03:a4:69:2c:b4
+tenancy=ocid1.tenancy.oc1..aaaaaaaa5frx4pqrno45woojq5rlrl7tyr4rkxy7csdrnbvvatqfaq7kyzha
+region=us-phoenix-1
+key_file=/home/runner/.oci/oci_signing_key.pem
+EOF
+          chmod 600 ~/.oci/config
+          echo "✅ Config written. Key size: $(wc -c < ~/.oci/oci_signing_key.pem) bytes"
+          echo "Config key_file: $(grep key_file ~/.oci/config)"
+          # Quick OCI CLI validation
+          oci iam user get --user-id ocid1.user.oc1..aaaaaaaa6tbdlgy2vcmh7tbos6hvvt5r4phsogby6oxbkrfoe4o7qld536ea --query 'data.name' --raw-output 2>&1 | head -2 || true
 
       # ── Step 3: Check VM state ──────────────────────────────
       - name: 🔍 Check VM lifecycle state
