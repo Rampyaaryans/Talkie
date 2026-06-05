@@ -39,14 +39,15 @@ jobs:
           OCI_KEY_CONTENT: ${{ secrets.OCI_SIGNING_KEY }}
         run: |
           mkdir -p ~/.oci
-          # Write config file (env var avoids heredoc YAML indent issues)
+          # Write config file — use $HOME not ~ (OCI CLI doesn't expand ~)
           printf '%s\n' "$OCI_CONFIG_CONTENT" > ~/.oci/config
+          # Replace key_file=~/ with key_file=$HOME/ for OCI CLI compatibility
+          sed -i "s|key_file=~/|key_file=$HOME/|g" ~/.oci/config
           # Write private signing key
           printf '%s\n' "$OCI_KEY_CONTENT" > ~/.oci/oci_signing_key.pem
           chmod 600 ~/.oci/config ~/.oci/oci_signing_key.pem
-          # Show non-sensitive parts to confirm
-          echo "Config [DEFAULT] section:"
-          grep -E "^(user|fingerprint|tenancy|region)=" ~/.oci/config || true
+          # Verify (grep redacts secrets automatically)
+          echo "key_file line: $(grep key_file ~/.oci/config)"
           echo "Key file size: $(wc -c < ~/.oci/oci_signing_key.pem) bytes"
 
       # ── Step 3: Check VM state ──────────────────────────────
