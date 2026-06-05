@@ -1,84 +1,107 @@
 name: blast-arm VM Guardian 🛡️
 
+# ── Triggers ────────────────────────────────────────────────
 on:
   schedule:
-    # Runs every 30 minutes, 24/7 — even when your PC is off
+    # Every 30 minutes, 24/7 — completely automatic, no human needed
     - cron: '*/30 * * * *'
-  workflow_dispatch:  # Manual trigger from GitHub UI
+  push:
+    branches: [master, main]   # Also runs on every code push
+  workflow_dispatch:            # Manual trigger from GitHub UI
+
+# Prevent parallel runs from conflicting
+concurrency:
+  group: vm-guardian
+  cancel-in-progress: false
 
 jobs:
   guardian:
-    name: Check & Heal blast-arm
+    name: 🛡️ Check & Heal blast-arm
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
+
+    env:
+      INSTANCE_ID: "ocid1.instance.oc1.phx.anyhqljr4x4qntycxa6y7uqcsjuafte7j5s7phdphkd4thjyhak6ggod3juq"
+      VM_IP: "129.146.108.100"
+      TENANCY_ID: "ocid1.tenancy.oc1..aaaaaaaa5frx4pqrno45woojq5rlrl7tyr4rkxy7csdrnbvvatqfaq7kyzha"
 
     steps:
-      - name: Setup OCI CLI
+      # ── Step 1: Setup OCI CLI (fast — uses pip cache) ──────
+      - name: ⚙️ Setup OCI CLI
         run: |
-          pip install oci-cli --quiet
+          pip install oci-cli --quiet --no-warn-script-location
+          oci --version
 
-      - name: Configure OCI credentials
+      # ── Step 2: Configure OCI credentials ──────────────────
+      - name: 🔑 Configure OCI credentials
         run: |
           mkdir -p ~/.oci
-          echo "${{ secrets.OCI_CONFIG }}" > ~/.oci/config
+          # Write config from GitHub Secret
+          cat > ~/.oci/config << 'CONFIG_EOF'
+          ${{ secrets.OCI_CONFIG }}
+          CONFIG_EOF
+          # Write signing key from GitHub Secret
           echo "${{ secrets.OCI_SIGNING_KEY }}" > ~/.oci/oci_signing_key.pem
           chmod 600 ~/.oci/config ~/.oci/oci_signing_key.pem
+          # Verify credentials work
+          oci iam user list --compartment-id "$TENANCY_ID" --limit 1 --query 'data[0].name' --raw-output 2>/dev/null && echo "✅ OCI auth OK" || echo "⚠️ OCI auth check failed"
 
-      - name: Check VM state + auto-heal
+      # ── Step 3: Check VM state ──────────────────────────────
+      - name: 🔍 Check VM lifecycle state
+        id: vm_state
         run: |
-          INSTANCE_ID="ocid1.instance.oc1.phx.anyhqljr4x4qntycxa6y7uqcsjuafte7j5s7phdphkd4thjyhak6ggod3juq"
-          VM_IP="129.146.108.100"
-
-          echo "🔍 Checking blast-arm state..."
           STATE=$(oci compute instance get \
             --instance-id "$INSTANCE_ID" \
             --query 'data."lifecycle-state"' \
-            --raw-output 2>/dev/null)
-
+            --raw-output 2>/dev/null || echo "UNKNOWN")
+          echo "state=$STATE" >> $GITHUB_OUTPUT
           echo "VM State: $STATE"
 
-          if [ "$STATE" = "RUNNING" ]; then
-            echo "✅ VM is RUNNING"
-
-            # Check HTTP health endpoint
-            echo "🏥 Checking health endpoint..."
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              --connect-timeout 10 \
-              "http://$VM_IP:8080/health" 2>/dev/null || echo "000")
-
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "✅ Bot health endpoint OK (HTTP 200)"
-            else
-              echo "⚠️  Health endpoint returned HTTP $HTTP_CODE — bot may be down"
-              echo "VM is running but bot may need restart"
-            fi
-
-          elif [ "$STATE" = "STOPPED" ]; then
-            echo "🔴 VM STOPPED — Starting it now!"
-            oci compute instance action \
-              --instance-id "$INSTANCE_ID" \
-              --action START
-
-            echo "⏳ Waiting for VM to reach RUNNING state..."
-            sleep 60
-
-            NEW_STATE=$(oci compute instance get \
+      # ── Step 4a: Auto-start if STOPPED ─────────────────────
+      - name: 🔴 Auto-start VM if STOPPED
+        if: steps.vm_state.outputs.state == 'STOPPED'
+        run: |
+          echo "🚨 VM is STOPPED — starting now!"
+          oci compute instance action \
+            --instance-id "$INSTANCE_ID" \
+            --action START
+          echo "⏳ Waiting up to 3 min for RUNNING state..."
+          for i in $(seq 1 18); do
+            sleep 10
+            STATE=$(oci compute instance get \
               --instance-id "$INSTANCE_ID" \
               --query 'data."lifecycle-state"' \
               --raw-output 2>/dev/null)
+            echo "  [$((i*10))s] State: $STATE"
+            if [ "$STATE" = "RUNNING" ]; then
+              echo "✅ VM is RUNNING again!"
+              break
+            fi
+          done
 
-            echo "New state: $NEW_STATE"
-
-          elif [ "$STATE" = "STOPPING" ] || [ "$STATE" = "STARTING" ]; then
-            echo "⏳ VM in transition: $STATE — no action needed"
-
+      # ── Step 4b: Report healthy state ──────────────────────
+      - name: ✅ Report VM healthy
+        if: steps.vm_state.outputs.state == 'RUNNING'
+        run: |
+          echo "✅ VM is RUNNING at $VM_IP"
+          # Check HTTP health endpoint (our bot's health server)
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+            --connect-timeout 8 --max-time 12 \
+            "http://$VM_IP:4000/" 2>/dev/null || echo "000")
+          echo "OpenClaw Gateway HTTP: $HTTP"
+          if [ "$HTTP" = "200" ]; then
+            echo "✅ OpenClaw gateway is responding"
           else
-            echo "🚨 UNEXPECTED STATE: $STATE"
-            echo "Manual intervention may be required"
+            echo "⚠️  Gateway HTTP $HTTP — may be starting up or bot is down"
           fi
 
-      - name: Ping health URL + log stats
+      # ── Step 5: Log summary ─────────────────────────────────
+      - name: 📊 Summary
+        if: always()
         run: |
-          VM_IP="129.146.108.100"
-          HEALTH=$(curl -s --connect-timeout 8 "http://$VM_IP:8080/health" 2>/dev/null || echo '{"status":"unreachable"}')
-          echo "📊 Health response: $HEALTH"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  blast-arm Guardian Run Complete"
+          echo "  Time (IST): $(TZ='Asia/Kolkata' date '+%Y-%m-%d %H:%M:%S')"
+          echo "  VM State:   ${{ steps.vm_state.outputs.state }}"
+          echo "  VM IP:      $VM_IP"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
