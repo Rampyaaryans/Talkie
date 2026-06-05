@@ -1,0 +1,84 @@
+name: blast-arm VM Guardian 🛡️
+
+on:
+  schedule:
+    # Runs every 30 minutes, 24/7 — even when your PC is off
+    - cron: '*/30 * * * *'
+  workflow_dispatch:  # Manual trigger from GitHub UI
+
+jobs:
+  guardian:
+    name: Check & Heal blast-arm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Setup OCI CLI
+        run: |
+          pip install oci-cli --quiet
+
+      - name: Configure OCI credentials
+        run: |
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CONFIG }}" > ~/.oci/config
+          echo "${{ secrets.OCI_SIGNING_KEY }}" > ~/.oci/oci_signing_key.pem
+          chmod 600 ~/.oci/config ~/.oci/oci_signing_key.pem
+
+      - name: Check VM state + auto-heal
+        run: |
+          INSTANCE_ID="ocid1.instance.oc1.phx.anyhqljr4x4qntycxa6y7uqcsjuafte7j5s7phdphkd4thjyhak6ggod3juq"
+          VM_IP="129.146.108.100"
+
+          echo "🔍 Checking blast-arm state..."
+          STATE=$(oci compute instance get \
+            --instance-id "$INSTANCE_ID" \
+            --query 'data."lifecycle-state"' \
+            --raw-output 2>/dev/null)
+
+          echo "VM State: $STATE"
+
+          if [ "$STATE" = "RUNNING" ]; then
+            echo "✅ VM is RUNNING"
+
+            # Check HTTP health endpoint
+            echo "🏥 Checking health endpoint..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              --connect-timeout 10 \
+              "http://$VM_IP:8080/health" 2>/dev/null || echo "000")
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Bot health endpoint OK (HTTP 200)"
+            else
+              echo "⚠️  Health endpoint returned HTTP $HTTP_CODE — bot may be down"
+              echo "VM is running but bot may need restart"
+            fi
+
+          elif [ "$STATE" = "STOPPED" ]; then
+            echo "🔴 VM STOPPED — Starting it now!"
+            oci compute instance action \
+              --instance-id "$INSTANCE_ID" \
+              --action START
+
+            echo "⏳ Waiting for VM to reach RUNNING state..."
+            sleep 60
+
+            NEW_STATE=$(oci compute instance get \
+              --instance-id "$INSTANCE_ID" \
+              --query 'data."lifecycle-state"' \
+              --raw-output 2>/dev/null)
+
+            echo "New state: $NEW_STATE"
+
+          elif [ "$STATE" = "STOPPING" ] || [ "$STATE" = "STARTING" ]; then
+            echo "⏳ VM in transition: $STATE — no action needed"
+
+          else
+            echo "🚨 UNEXPECTED STATE: $STATE"
+            echo "Manual intervention may be required"
+          fi
+
+      - name: Ping health URL + log stats
+        run: |
+          VM_IP="129.146.108.100"
+          HEALTH=$(curl -s --connect-timeout 8 "http://$VM_IP:8080/health" 2>/dev/null || echo '{"status":"unreachable"}')
+          echo "📊 Health response: $HEALTH"

@@ -1,0 +1,6 @@
+# Files to never commit (contains secrets)
+.env
+*.pem
+*.key
+*.json.bak
+sentinel.log
