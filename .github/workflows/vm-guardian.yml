@@ -42,19 +42,18 @@ jobs:
           # Write private signing key from secret
           printf '%s\n' "$OCI_KEY_CONTENT" > ~/.oci/oci_signing_key.pem
           chmod 600 ~/.oci/oci_signing_key.pem
-          # Write config MANUALLY field by field — avoids any whitespace/encoding from secret
-          cat > ~/.oci/config << EOF
-[DEFAULT]
-user=ocid1.user.oc1..aaaaaaaa6tbdlgy2vcmh7tbos6hvvt5r4phsogby6oxbkrfoe4o7qld536ea
-fingerprint=e4:22:ee:4b:ea:e4:c9:96:20:bf:7e:03:a4:69:2c:b4
-tenancy=ocid1.tenancy.oc1..aaaaaaaa5frx4pqrno45woojq5rlrl7tyr4rkxy7csdrnbvvatqfaq7kyzha
-region=us-phoenix-1
-key_file=/home/runner/.oci/oci_signing_key.pem
-EOF
+          # Write config using printf (heredoc breaks YAML multiline blocks)
+          {
+            printf '[DEFAULT]\n'
+            printf 'user=ocid1.user.oc1..aaaaaaaa6tbdlgy2vcmh7tbos6hvvt5r4phsogby6oxbkrfoe4o7qld536ea\n'
+            printf 'fingerprint=e4:22:ee:4b:ea:e4:c9:96:20:bf:7e:03:a4:69:2c:b4\n'
+            printf 'tenancy=ocid1.tenancy.oc1..aaaaaaaa5frx4pqrno45woojq5rlrl7tyr4rkxy7csdrnbvvatqfaq7kyzha\n'
+            printf 'region=us-phoenix-1\n'
+            printf 'key_file=/home/runner/.oci/oci_signing_key.pem\n'
+          } > ~/.oci/config
           chmod 600 ~/.oci/config
-          echo "✅ Config written. Key size: $(wc -c < ~/.oci/oci_signing_key.pem) bytes"
           echo "Config key_file: $(grep key_file ~/.oci/config)"
-          # Quick OCI CLI validation
+          echo "Key file size: $(wc -c < ~/.oci/oci_signing_key.pem) bytes"
           oci iam user get --user-id ocid1.user.oc1..aaaaaaaa6tbdlgy2vcmh7tbos6hvvt5r4phsogby6oxbkrfoe4o7qld536ea --query 'data.name' --raw-output 2>&1 | head -2 || true
 
       # ── Step 3: Check VM state ──────────────────────────────
