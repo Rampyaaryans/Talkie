@@ -3,13 +3,13 @@ name: blast-arm VM Guardian 🛡️
 # ── Triggers ────────────────────────────────────────────────
 on:
   schedule:
-    # Every 30 minutes, 24/7 — completely automatic, no human needed
+    # Every 30 minutes, 24/7 — completely automatic, zero human intervention
     - cron: '*/30 * * * *'
   push:
-    branches: [master, main]   # Also runs on every code push
-  workflow_dispatch:            # Manual trigger from GitHub UI
+    branches: [master, main]   # Fires immediately on every code push
+  workflow_dispatch:            # Manual trigger from GitHub UI anytime
 
-# Prevent parallel runs from conflicting
+# Prevent parallel runs conflicting
 concurrency:
   group: vm-guardian
   cancel-in-progress: false
@@ -26,34 +26,41 @@ jobs:
       TENANCY_ID: "ocid1.tenancy.oc1..aaaaaaaa5frx4pqrno45woojq5rlrl7tyr4rkxy7csdrnbvvatqfaq7kyzha"
 
     steps:
-      # ── Step 1: Setup OCI CLI (fast — uses pip cache) ──────
+      # ── Step 1: Setup OCI CLI ──────────────────────────────
       - name: ⚙️ Setup OCI CLI
         run: |
           pip install oci-cli --quiet --no-warn-script-location
-          oci --version
+          echo "OCI CLI version: $(oci --version)"
 
-      # ── Step 2: Configure OCI credentials ──────────────────
+      # ── Step 2: Write OCI credentials from secrets ─────────
       - name: 🔑 Configure OCI credentials
+        env:
+          OCI_CONFIG_CONTENT: ${{ secrets.OCI_CONFIG }}
+          OCI_KEY_CONTENT: ${{ secrets.OCI_SIGNING_KEY }}
         run: |
           mkdir -p ~/.oci
-          # Write config from GitHub Secret
-          cat > ~/.oci/config << 'CONFIG_EOF'
-          ${{ secrets.OCI_CONFIG }}
-          CONFIG_EOF
-          # Write signing key from GitHub Secret
-          echo "${{ secrets.OCI_SIGNING_KEY }}" > ~/.oci/oci_signing_key.pem
+          # Write config file (env var avoids heredoc YAML indent issues)
+          printf '%s\n' "$OCI_CONFIG_CONTENT" > ~/.oci/config
+          # Write private signing key
+          printf '%s\n' "$OCI_KEY_CONTENT" > ~/.oci/oci_signing_key.pem
           chmod 600 ~/.oci/config ~/.oci/oci_signing_key.pem
-          # Verify credentials work
-          oci iam user list --compartment-id "$TENANCY_ID" --limit 1 --query 'data[0].name' --raw-output 2>/dev/null && echo "✅ OCI auth OK" || echo "⚠️ OCI auth check failed"
+          # Show non-sensitive parts to confirm
+          echo "Config [DEFAULT] section:"
+          grep -E "^(user|fingerprint|tenancy|region)=" ~/.oci/config || true
+          echo "Key file size: $(wc -c < ~/.oci/oci_signing_key.pem) bytes"
 
       # ── Step 3: Check VM state ──────────────────────────────
       - name: 🔍 Check VM lifecycle state
         id: vm_state
         run: |
+          echo "Querying OCI for blast-arm state..."
           STATE=$(oci compute instance get \
             --instance-id "$INSTANCE_ID" \
             --query 'data."lifecycle-state"' \
-            --raw-output 2>/dev/null || echo "UNKNOWN")
+            --raw-output 2>&1) || STATE="ERROR"
+          echo "Raw OCI response: $STATE"
+          # Clean up state value
+          STATE=$(echo "$STATE" | grep -E "^[A-Z]" | head -1 || echo "UNKNOWN")
           echo "state=$STATE" >> $GITHUB_OUTPUT
           echo "VM State: $STATE"
 
@@ -71,7 +78,7 @@ jobs:
             STATE=$(oci compute instance get \
               --instance-id "$INSTANCE_ID" \
               --query 'data."lifecycle-state"' \
-              --raw-output 2>/dev/null)
+              --raw-output 2>/dev/null | tr -d '"' || echo "UNKNOWN")
             echo "  [$((i*10))s] State: $STATE"
             if [ "$STATE" = "RUNNING" ]; then
               echo "✅ VM is RUNNING again!"
@@ -79,23 +86,18 @@ jobs:
             fi
           done
 
-      # ── Step 4b: Report healthy state ──────────────────────
+      # ── Step 4b: VM is healthy ─────────────────────────────
       - name: ✅ Report VM healthy
         if: steps.vm_state.outputs.state == 'RUNNING'
         run: |
           echo "✅ VM is RUNNING at $VM_IP"
-          # Check HTTP health endpoint (our bot's health server)
           HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
             --connect-timeout 8 --max-time 12 \
             "http://$VM_IP:4000/" 2>/dev/null || echo "000")
-          echo "OpenClaw Gateway HTTP: $HTTP"
-          if [ "$HTTP" = "200" ]; then
-            echo "✅ OpenClaw gateway is responding"
-          else
-            echo "⚠️  Gateway HTTP $HTTP — may be starting up or bot is down"
-          fi
+          echo "OpenClaw Gateway HTTP status: $HTTP"
+          [ "$HTTP" = "200" ] && echo "✅ OpenClaw gateway OK" || echo "⚠️ Gateway HTTP $HTTP"
 
-      # ── Step 5: Log summary ─────────────────────────────────
+      # ── Step 5: Summary ─────────────────────────────────────
       - name: 📊 Summary
         if: always()
         run: |
