@@ -55,15 +55,26 @@ jobs:
         id: vm_state
         run: |
           echo "Querying OCI for blast-arm state..."
-          STATE=$(oci compute instance get \
+          OCI_OUT=$(oci compute instance get \
             --instance-id "$INSTANCE_ID" \
             --query 'data."lifecycle-state"' \
-            --raw-output 2>&1) || STATE="ERROR"
-          echo "Raw OCI response: $STATE"
-          # Clean up state value
-          STATE=$(echo "$STATE" | grep -E "^[A-Z]" | head -1 || echo "UNKNOWN")
-          echo "state=$STATE" >> $GITHUB_OUTPUT
-          echo "VM State: $STATE"
+            --raw-output 2>&1) && STATE="$OCI_OUT" || STATE="ERROR"
+          echo "Raw OCI response: $OCI_OUT"
+          # If error, show details (redacted by GH but visible to us)
+          if [ "$STATE" = "ERROR" ]; then
+            echo "OCI CLI error detail: $OCI_OUT" >&2
+            # Try with explicit profile
+            OCI_OUT2=$(oci compute instance get \
+              --instance-id "$INSTANCE_ID" \
+              --query 'data."lifecycle-state"' \
+              --raw-output \
+              --profile DEFAULT 2>&1) && STATE="$OCI_OUT2" || STATE="ERROR"
+            echo "Retry response: $OCI_OUT2"
+          fi
+          # Extract just the state word
+          CLEAN=$(echo "$STATE" | tr -d '"' | grep -E "^(RUNNING|STOPPED|STOPPING|STARTING|TERMINATED|PROVISIONING)" | head -1 || echo "UNKNOWN")
+          echo "state=$CLEAN" >> $GITHUB_OUTPUT
+          echo "VM State: $CLEAN"
 
       # ── Step 4a: Auto-start if STOPPED ─────────────────────
       - name: 🔴 Auto-start VM if STOPPED
